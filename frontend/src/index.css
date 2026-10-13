@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    font-family: 'Inter', sans-serif;
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-300;
+  }
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* High-Tech AI Scan Animation */
+@keyframes scanline {
+  0% {
+    top: 0%;
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    top: 100%;
+    opacity: 0.8;
+  }
+}
+
+.animate-scanline {
+  animation: scanline 2.2s ease-in-out infinite;
+}
+
+.scan-beam {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, #38bdf8, #60a5fa, #38bdf8, transparent);
+  box-shadow: 0 0 16px #38bdf8, 0 0 32px #3b82f6;
+}
+
+.scan-grid {
+  background-size: 28px 28px;
+  background-image: linear-gradient(to right, rgba(56, 189, 248, 0.12) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(56, 189, 248, 0.12) 1px, transparent 1px);
+}
+
+/* Subtle Ambient Background Mesh Grid */
+.bg-grid-subtle {
+  background-size: 36px 36px;
+  background-image: linear-gradient(to right, rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(148, 163, 184, 0.07) 1px, transparent 1px);
+}
+.dark .bg-grid-subtle {
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+}
+
+/* Ultra-Smooth Low-CPU Mesh Ambient Float Animations */
+@keyframes ambientDrift {
+  0% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  50% {
+    transform: translate(30px, 20px) scale(1.05);
+  }
+  100% {
+    transform: translate(-20px, 15px) scale(0.98);
+  }
+}
+
+@keyframes ambientDriftReverse {
+  0% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  50% {
+    transform: translate(-30px, -15px) scale(1.04);
+  }
+  100% {
+    transform: translate(25px, -20px) scale(0.96);
+  }
+}
+
+.animate-ambient-slow {
+  animation: ambientDrift 18s ease-in-out infinite alternate;
+}
+
+.animate-ambient-reverse {
+  animation: ambientDriftReverse 22s ease-in-out infinite alternate;
+}

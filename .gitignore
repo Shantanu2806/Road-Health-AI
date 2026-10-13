@@ -1,0 +1,82 @@
+# ==============================================================================
+# Road Health AI - Git Ignore Rules
+# ==============================================================================
+
+# Operating System & IDE Files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment Variables & Secrets (CRITICAL)
+.env
+*.env
+.env.*
+!.env.example
+
+# Datasets & Massive Archives (13 GB RDD2022 dataset archive)
+21431547/
+21431547.zip
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+dataset/
+datasets/
+data/
+
+# Python & Virtual Environments
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+temp_test_scenarios/
+Road_Health_AI_Documentation_Temp.html
+*.log
+
+# SQLite Databases & Static Generated Uploads
+*.db
+*.sqlite
+*.sqlite3
+backend/road_damage.db
+backend/road_health.db
+backend/static/uploads/
+backend/static/annotated/
+
+# Node & Frontend Build
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+.npm
+.eslintcache

@@ -72,6 +72,9 @@ backend/road_damage.db
 backend/road_health.db
 backend/static/uploads/
 backend/static/annotated/
+backend/static/reports/
+backend/static/repairs/
+backend/static/emails/
 
 # Node & Frontend Build
 node_modules/

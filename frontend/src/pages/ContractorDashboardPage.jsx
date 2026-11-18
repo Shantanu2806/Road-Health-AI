@@ -25,6 +25,7 @@ export default function ContractorDashboardPage() {
   const { user } = useAuth();
   const [data, setData] = useState(null);
   const [analyses, setAnalyses] = useState([]);
+  const [assignedTickets, setAssignedTickets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
@@ -40,6 +41,13 @@ export default function ContractorDashboardPage() {
       console.error("Failed to fetch contractor telemetry:", err);
       errorCount++;
       setError(err.response?.data?.detail || "Failed to fetch contractor telemetry from server.");
+    }
+
+    try {
+      const ticketsRes = await apiClient.get("/tickets");
+      setAssignedTickets(ticketsRes.data || []);
+    } catch (err) {
+      console.error("Failed to fetch assigned tickets:", err);
     }
 
     try {
@@ -92,6 +100,57 @@ export default function ContractorDashboardPage() {
         </span>
       );
     }
+  };
+
+  const renderTicketPriorityBadge = (priority) => {
+    const p = (priority || "").toLowerCase();
+    if (p === "critical") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase bg-red-950 text-red-200 border border-red-700/80 shadow-sm">
+          <span>🔴</span>
+          <span>CRITICAL</span>
+        </span>
+      );
+    } else if (p === "high") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase bg-orange-950 text-orange-200 border border-orange-700/80 shadow-sm">
+          <span>🟠</span>
+          <span>HIGH</span>
+        </span>
+      );
+    } else if (p === "medium") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase bg-yellow-950 text-yellow-200 border border-yellow-700/80 shadow-sm">
+          <span>🟡</span>
+          <span>MEDIUM</span>
+        </span>
+      );
+    } else {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase bg-green-950 text-green-200 border border-green-700/80 shadow-sm">
+          <span>🟢</span>
+          <span>LOW</span>
+        </span>
+      );
+    }
+  };
+
+  const renderTicketStatusBadge = (status) => {
+    const s = (status || "").toLowerCase();
+    let bg = "bg-slate-800 text-slate-300 border-slate-700";
+    if (s === "reported") bg = "bg-blue-950 text-blue-300 border-blue-800";
+    else if (s === "verified") bg = "bg-indigo-950 text-indigo-300 border-indigo-800";
+    else if (s === "assigned") bg = "bg-amber-950 text-amber-300 border-amber-800";
+    else if (s === "in progress") bg = "bg-cyan-950 text-cyan-300 border-cyan-800";
+    else if (s === "repair submitted") bg = "bg-purple-950 text-purple-300 border-purple-800";
+    else if (s === "resolved") bg = "bg-emerald-950 text-emerald-300 border-emerald-800";
+    else if (s === "rejected") bg = "bg-rose-950 text-rose-300 border-rose-800";
+
+    return (
+      <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${bg}`}>
+        {status}
+      </span>
+    );
   };
 
   const filteredAnalyses = analyses.filter((item) => {
@@ -241,75 +300,74 @@ export default function ContractorDashboardPage() {
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 dark:bg-slate-950/70 text-slate-600 dark:text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-200 dark:border-slate-800">
               <tr>
-                <th className="py-3 px-4 font-semibold">Priority</th>
+                <th className="py-3 px-4 font-semibold">Ticket ID</th>
                 <th className="py-3 px-4 font-semibold">Location</th>
+                <th className="py-3 px-4 font-semibold">Priority</th>
                 <th className="py-3 px-4 font-semibold">Score</th>
-                <th className="py-3 px-4 font-semibold">Condition</th>
-                <th className="py-3 px-4 font-semibold">Defects</th>
-                <th className="py-3 px-4 font-semibold">Reported At</th>
+                <th className="py-3 px-4 font-semibold">Deadline</th>
+                <th className="py-3 px-4 font-semibold">Status</th>
                 <th className="py-3 px-4 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60">
-              {priorityQueue.length === 0 ? (
+              {assignedTickets.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-12 text-center text-slate-400 dark:text-slate-500 italic">
                     <CheckCircle className="w-7 h-7 text-emerald-500 mx-auto mb-2" />
                     <span className="font-medium text-slate-600 dark:text-slate-400">
-                      No active repair requests in your area
+                      No maintenance tickets currently assigned to you
                     </span>
                   </td>
                 </tr>
               ) : (
-                priorityQueue.map((item) => (
-                  <tr
-                    key={item.id}
-                    className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
-                  >
-                    <td className="py-3 px-4">
-                      {renderPriorityBadge(item.road_health_score, item.condition_label)}
-                    </td>
-                    <td className="py-3 px-4 font-medium text-slate-900 dark:text-white max-w-xs truncate">
-                      {item.location_name || (
-                        <span className="text-slate-400 italic">Location not provided</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 font-extrabold text-slate-900 dark:text-white">
-                      {item.road_health_score.toFixed(1)} / 100
-                    </td>
-                    <td className="py-3 px-4">
-                      <span
-                        className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          item.condition_label === "Critical"
-                            ? "bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400 border border-rose-300 dark:border-rose-800"
-                            : item.condition_label === "Poor"
-                            ? "bg-orange-100 text-orange-700 dark:bg-orange-950/60 dark:text-orange-400 border border-orange-300 dark:border-orange-800"
-                            : "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400 border border-amber-300 dark:border-amber-800"
-                        }`}
-                      >
-                        {item.condition_label}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 font-mono font-semibold text-slate-700 dark:text-slate-300">
-                      {item.detection_count ?? (item.detections ? item.detections.length : 0)} defect(s)
-                    </td>
-                    <td className="py-3 px-4 text-slate-500">
-                      {new Date(item.timestamp).toLocaleDateString()}{" "}
-                      <span className="text-[10px] text-slate-400">
-                        {new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <Link
-                        to={`/results/${item.id}`}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline"
-                      >
-                        <span>View</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </Link>
-                    </td>
-                  </tr>
-                ))
+                assignedTickets.map((ticket) => {
+                  const isOverdue = ticket.is_overdue || (ticket.deadline && new Date(ticket.deadline) < new Date() && ticket.status !== "Resolved");
+                  return (
+                    <tr
+                      key={ticket.id || ticket.ticket_id}
+                      className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
+                    >
+                      <td className="py-3 px-4">
+                        <span className="font-mono text-xs font-bold text-cyan-600 dark:text-cyan-400 px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/20">
+                          {ticket.ticket_id}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 font-medium text-slate-900 dark:text-white max-w-xs truncate">
+                        {ticket.location_name || (
+                          <span className="text-slate-400 italic">Location not specified</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        {renderTicketPriorityBadge(ticket.priority)}
+                      </td>
+                      <td className="py-3 px-4 font-extrabold text-slate-900 dark:text-white font-mono">
+                        {ticket.road_health_score != null ? `${ticket.road_health_score.toFixed(1)} / 100` : "N/A"}
+                      </td>
+                      <td className="py-3 px-4">
+                        {ticket.deadline ? (
+                          <span className={`font-mono text-xs ${isOverdue ? "text-rose-600 dark:text-rose-400 font-bold flex items-center gap-1" : "text-slate-600 dark:text-slate-400"}`}>
+                            {isOverdue && <span>⚠️</span>}
+                            {new Date(ticket.deadline).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 italic">No deadline</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        {renderTicketStatusBadge(ticket.status)}
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <Link
+                          to={`/tickets/${ticket.ticket_id}`}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition-all"
+                        >
+                          <span>View Ticket</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

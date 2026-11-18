@@ -116,4 +116,161 @@ export async function resendDamageAlert(analysisId) {
   return response.data;
 }
 
+// ─── Maintenance Ticket API Functions ───
+
+/**
+ * List maintenance tickets with optional filters.
+ */
+export async function getTickets({
+  status,
+  priority,
+  location,
+  date_from,
+  date_to,
+  contractor_id,
+  overdue_only,
+  assignedToMe,
+  limit = 100,
+  offset = 0,
+} = {}) {
+  const params = { limit, offset };
+  if (status) params.status = status;
+  if (priority) params.priority = priority;
+  if (location) params.location = location;
+  if (date_from) params.date_from = date_from;
+  if (date_to) params.date_to = date_to;
+  if (contractor_id) params.contractor_id = contractor_id;
+  if (overdue_only) params.overdue_only = true;
+  if (assignedToMe) params.assigned_to_me = true;
+  const response = await apiClient.get("/tickets", { params });
+  return response.data;
+}
+
+/**
+ * Get detailed ticket information.
+ */
+export async function getTicketDetail(ticketId) {
+  const response = await apiClient.get(`/tickets/${ticketId}`);
+  return response.data;
+}
+
+/**
+ * Admin verifies reported ticket.
+ */
+export async function verifyTicket(ticketId) {
+  const response = await apiClient.post(`/tickets/${ticketId}/verify`);
+  return response.data;
+}
+
+/**
+ * Fetch approved contractors (optionally ranked by proximity to ticket location).
+ * @param {string} location
+ */
+export async function getContractors(location = "") {
+  const params = {};
+  if (location) params.location = location;
+  const response = await apiClient.get("/admin/contractors", { params });
+  return response.data;
+}
+
+/**
+ * Assign a ticket to a contractor (admin only).
+ */
+export async function assignTicket(ticketId, { contractor_id, deadline, deadline_days, road_importance, notes } = {}) {
+  const response = await apiClient.post(`/tickets/${ticketId}/assign`, {
+    contractor_id,
+    deadline,
+    deadline_days,
+    road_importance: road_importance || "Unknown",
+    notes,
+  });
+  return response.data;
+}
+
+/**
+ * Start work on a ticket (contractor).
+ */
+export async function startTicketWork(ticketId, notes = null) {
+  const response = await apiClient.post(`/tickets/${ticketId}/start`, { notes, comment: notes });
+  return response.data;
+}
+
+/**
+ * Submit repair proof for a ticket (contractor).
+ */
+export async function submitRepair(ticketId, { notes, afterImage } = {}) {
+  const formData = new FormData();
+  if (notes) formData.append("notes", notes);
+  if (afterImage) formData.append("after_image", afterImage);
+
+  const response = await apiClient.post(`/tickets/${ticketId}/submit-repair`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return response.data;
+}
+
+/**
+ * Approve a repair submission (admin).
+ */
+export async function approveRepair(ticketId) {
+  const response = await apiClient.post(`/tickets/${ticketId}/approve-repair`);
+  return response.data;
+}
+
+/**
+ * Reject a repair submission (admin).
+ */
+export async function rejectRepair(ticketId, rejection_reason) {
+  const response = await apiClient.post(`/tickets/${ticketId}/reject-repair`, {
+    rejection_reason,
+  });
+  return response.data;
+}
+
+/**
+ * Reopen a resolved/rejected ticket (admin).
+ */
+export async function reopenTicket(ticketId, notes = null) {
+  const response = await apiClient.post(`/tickets/${ticketId}/reopen`, { notes, comment: notes });
+  return response.data;
+}
+
+/**
+ * Merge duplicate ticket into target (admin).
+ */
+export async function mergeTicket(ticketId, { merge_into_ticket_id, reason } = {}) {
+  const response = await apiClient.post(`/tickets/${ticketId}/merge`, {
+    merge_into_ticket_id,
+    reason,
+  });
+  return response.data;
+}
+
+/**
+ * Get maintenance summary dashboard (admin).
+ */
+export async function getMaintenanceSummary() {
+  const response = await apiClient.get("/admin/tickets/summary");
+  return response.data;
+}
+
+/**
+ * Export tickets as CSV (admin).
+ */
+export async function exportTicketsCSV(filters = {}) {
+  const response = await apiClient.get("/admin/tickets/export-csv", {
+    params: filters,
+    responseType: "blob",
+  });
+  return response.data;
+}
+
+/**
+ * Get overdue tickets (admin).
+ */
+export async function getOverdueTickets() {
+  const response = await apiClient.get("/admin/tickets/overdue");
+  return response.data;
+}
+
 export default apiClient;

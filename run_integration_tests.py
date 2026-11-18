@@ -22,6 +22,21 @@ BASE_URL = "http://127.0.0.1:8000"
 TEST_DIR = Path("temp_test_scenarios")
 TEST_DIR.mkdir(parents=True, exist_ok=True)
 
+AUTH_HEADERS = {}
+
+def get_auth_headers():
+    global AUTH_HEADERS
+    if not AUTH_HEADERS:
+        login_resp = requests.post(
+            f"{BASE_URL}/auth/login",
+            json={"email": "kauteshantanu0@gmail.com", "password": "Shantanu@123"},
+            timeout=10,
+        )
+        if login_resp.status_code == 200:
+            token = login_resp.json().get("access_token")
+            AUTH_HEADERS = {"Authorization": f"Bearer {token}"}
+    return AUTH_HEADERS
+
 
 def test_scenario_1_clean_road():
     print("\n" + "=" * 70)
@@ -38,6 +53,7 @@ def test_scenario_1_clean_road():
             f"{BASE_URL}/analyze",
             files={"file": (clean_path.name, f, "image/jpeg")},
             data={"conf_threshold": 0.25},
+            headers=get_auth_headers(),
             timeout=30,
         )
     
@@ -91,6 +107,7 @@ def test_scenario_2_damaged_road():
             f"{BASE_URL}/analyze",
             files={"file": (rdd_img_path.name, f, "image/jpeg")},
             data={"conf_threshold": 0.25},
+            headers=get_auth_headers(),
             timeout=30,
         )
     
@@ -147,6 +164,7 @@ def test_scenario_2b_damaged_road_second():
             f"{BASE_URL}/analyze",
             files={"file": (rdd_img_path.name, f, "image/jpeg")},
             data={"conf_threshold": 0.25},
+            headers=get_auth_headers(),
             timeout=30,
         )
     
@@ -192,6 +210,7 @@ def test_scenario_3_blurry_image():
             f"{BASE_URL}/analyze",
             files={"file": (blurry_path.name, f, "image/jpeg")},
             data={"conf_threshold": 0.25},
+            headers=get_auth_headers(),
             timeout=30,
         )
     
@@ -243,6 +262,7 @@ def test_scenario_4_large_and_non_image():
         resp_large = requests.post(
             f"{BASE_URL}/analyze",
             files={"file": (large_file_path.name, f, "image/jpeg")},
+            headers=get_auth_headers(),
             timeout=30,
         )
     
@@ -259,6 +279,7 @@ def test_scenario_4_large_and_non_image():
         resp_txt = requests.post(
             f"{BASE_URL}/analyze",
             files={"file": (txt_file_path.name, f, "text/plain")},
+            headers=get_auth_headers(),
             timeout=15,
         )
     print(f"  HTTP Status Code: {resp_txt.status_code}")
@@ -274,6 +295,7 @@ def test_scenario_4_large_and_non_image():
         resp_pdf = requests.post(
             f"{BASE_URL}/analyze",
             files={"file": (pdf_file_path.name, f, "application/pdf")},
+            headers=get_auth_headers(),
             timeout=15,
         )
     print(f"  HTTP Status Code: {resp_pdf.status_code}")
@@ -294,7 +316,7 @@ def test_defensive_checks(created_ids):
     
     # 1. Check if annotated image exists on disk even for 0 detections (Scenario 1)
     clean_id = created_ids[0]
-    resp = requests.get(f"{BASE_URL}/analyses/{clean_id}")
+    resp = requests.get(f"{BASE_URL}/analyses/{clean_id}", headers=get_auth_headers())
     if resp.status_code != 200:
         print(f"FAIL: Could not retrieve analysis #{clean_id}")
         disk_check = False
@@ -309,7 +331,7 @@ def test_defensive_checks(created_ids):
         disk_check = exists
     
     # 2. Check history endpoint returns all created records correctly
-    resp_hist = requests.get(f"{BASE_URL}/history?limit=50")
+    resp_hist = requests.get(f"{BASE_URL}/history?limit=50", headers=get_auth_headers())
     if resp_hist.status_code != 200:
         print(f"FAIL: History endpoint returned {resp_hist.status_code}")
         history_check = False

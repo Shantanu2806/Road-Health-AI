@@ -19,6 +19,8 @@ import RoadMapPage from "./pages/RoadMapPage";
 import ContractorDashboardPage from "./pages/ContractorDashboardPage";
 import ContractorProfilePage from "./pages/ContractorProfilePage";
 import AdminDashboardPage from "./pages/AdminDashboardPage";
+import TicketsPage from "./pages/TicketsPage";
+import TicketDetailPage from "./pages/TicketDetailPage";
 
 function AppLayout() {
   const location = useLocation();
@@ -27,10 +29,10 @@ function AppLayout() {
 
   return (
     <div className="flex flex-col min-h-screen relative selection:bg-blue-500/25">
-      {/* Ambient Moving Mesh Background */}
-      <AmbientBackground />
+      {/* Ambient Moving Mesh Background (non-landing pages) */}
+      {!isLandingPage && <AmbientBackground />}
 
-      <Navbar />
+      {!isLandingPage && <Navbar />}
 
       <main className="flex-1 relative z-10">
         <Routes>
@@ -64,6 +66,24 @@ function AppLayout() {
             element={
               <ProtectedRoute allowedRoles={["user", "contractor", "admin"]}>
                 <HistoryPage />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Maintenance Ticket Routes (Accessible to all authenticated users) */}
+          <Route
+            path="/tickets"
+            element={
+              <ProtectedRoute allowedRoles={["user", "contractor", "admin"]}>
+                <TicketsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/tickets/:ticketId"
+            element={
+              <ProtectedRoute allowedRoles={["user", "contractor", "admin"]}>
+                <TicketDetailPage />
               </ProtectedRoute>
             }
           />

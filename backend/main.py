@@ -9,12 +9,16 @@ Features:
 """
 
 import os
+import io
+import csv
 import uuid
+import math
 import shutil
 import random
 import string
+import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 
 import httpx
@@ -30,7 +34,7 @@ from fastapi import (
     Request,
     status,
 )
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -41,7 +45,11 @@ load_dotenv()
 
 # Local application modules
 from database import engine, Base, get_db, SessionLocal
-from models import Analysis, User, EmailLog, UserRole, run_db_migrations
+from models import (
+    Analysis, User, EmailLog, UserRole, run_db_migrations,
+    MaintenanceTicket, RepairSubmission, TicketStatusHistory,
+    TicketStatus, TicketPriority, RoadImportance, RepairStatus,
+)
 from schemas import (
     AnalysisResponse,
     HealthStatus,
@@ -57,10 +65,33 @@ from schemas import (
     EmailLogResponse,
     AdminStatsResponse,
     ContractorDashboardResponse,
+    TicketResponse,
+    TicketAssignRequest,
+    TicketStatusUpdate,
+    TicketReopenRequest,
+    RepairRejectRequest,
+    RepairSubmissionCreate,
+    RepairSubmissionResponse,
+    TicketStatusHistoryResponse,
+    TicketDetailResponse,
+    MaintenanceSummaryResponse,
+    TicketMergeRequest,
+    RepairVerificationRequest,
 )
 from scoring import assess_road_health
 from visualizer import annotate_image
 from inference_stub import run_inference
+from email_service import (
+    send_ticket_assigned_email,
+    send_ticket_assigned_user_email,
+    send_overdue_warning_email,
+    send_repair_submitted_admin_email,
+    send_repair_approved_contractor_email,
+    send_repair_approved_user_email,
+    send_repair_rejected_contractor_email,
+    normalize_location_text,
+    token_matches_location,
+)
 from auth import (
     hash_password,
     verify_password,
@@ -215,6 +246,10 @@ def _format_analysis_response(item: Analysis, include_user_info: bool = False) -
         "original_image_url": orig_url,
         "annotated_image_url": annot_url,
         "annotated_image_path": annot_path,
+        "ticket_id": item.tickets[0].ticket_id if (hasattr(item, "tickets") and item.tickets) else None,
+        "ticket_priority": item.tickets[0].priority if (hasattr(item, "tickets") and item.tickets) else None,
+        "ticket_status": item.tickets[0].status if (hasattr(item, "tickets") and item.tickets) else None,
+        "possible_duplicate": None,
     }
 
     if include_user_info:
@@ -222,6 +257,287 @@ def _format_analysis_response(item: Analysis, include_user_info: bool = False) -
         resp["user_email"] = item.user.email if item.user else "N/A"
 
     return resp
+
+
+# Setup logger
+logger = logging.getLogger("road_health")
+
+
+# -----------------------------------------------------------------------------
+# MAINTENANCE TICKET HELPERS
+# -----------------------------------------------------------------------------
+def _generate_ticket_id(db: Session) -> str:
+    """Generate a unique sequential ticket ID like RH-2026-0001."""
+    year = datetime.now().year
+    last_ticket = (
+        db.query(MaintenanceTicket)
+        .filter(MaintenanceTicket.ticket_id.like(f"RH-{year}-%"))
+        .order_by(MaintenanceTicket.id.desc())
+        .first()
+    )
+    if last_ticket:
+        try:
+            last_num = int(last_ticket.ticket_id.split("-")[-1])
+            next_num = last_num + 1
+        except (ValueError, IndexError):
+            next_num = 1
+    else:
+        next_num = 1
+    return f"RH-{year}-{next_num:04d}"
+
+
+def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the Haversine distance in meters between two GPS coordinates."""
+    R = 6371000  # Earth radius in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+def check_duplicate_ticket(
+    latitude: Optional[float],
+    longitude: Optional[float],
+    db: Session,
+    exclude_ticket_id: Optional[int] = None,
+) -> Optional[Tuple[MaintenanceTicket, float]]:
+    """
+    Check for potential duplicate tickets within 50 meters and 30 days.
+    Returns (ticket, distance_in_meters) if found, else None.
+    """
+    if latitude is None or longitude is None:
+        return None
+
+    cutoff_date = datetime.now().astimezone() - timedelta(days=30)
+    candidates = (
+        db.query(MaintenanceTicket)
+        .filter(
+            MaintenanceTicket.created_at >= cutoff_date,
+            MaintenanceTicket.status.notin_([TicketStatus.RESOLVED, TicketStatus.REJECTED]),
+        )
+        .all()
+    )
+
+    closest_match = None
+    min_dist = float("inf")
+
+    for candidate in candidates:
+        if exclude_ticket_id and candidate.id == exclude_ticket_id:
+            continue
+
+        ticket_lat = candidate.latitude
+        ticket_lng = candidate.longitude
+        if (ticket_lat is None or ticket_lng is None) and candidate.analysis:
+            ticket_lat = candidate.analysis.latitude
+            ticket_lng = candidate.analysis.longitude
+
+        if ticket_lat is None or ticket_lng is None:
+            continue
+
+        dist = _haversine_distance(latitude, longitude, ticket_lat, ticket_lng)
+        if dist <= 50.0 and dist < min_dist:
+            min_dist = dist
+            closest_match = (candidate, dist)
+
+    return closest_match
+
+
+def _calculate_priority_and_reason(
+    score: float,
+    condition_label: str,
+    damage_index: float,
+    has_gps: bool,
+    num_defects: int,
+) -> Tuple[str, str]:
+    """
+    Calculate priority and priority_reason using exact spec logic:
+    - Base priority from score:
+      * 0-30 -> Critical
+      * 31-45 -> High
+      * 46-60 -> Medium
+    - Upgrade priority if damage_index > 15 (upgrade one level)
+    - Downgrade priority if no GPS: keep as is
+    - Build priority_reason string explaining decision
+    """
+    if score <= 30:
+        base = TicketPriority.CRITICAL
+    elif score <= 45:
+        base = TicketPriority.HIGH
+    else:
+        base = TicketPriority.MEDIUM
+
+    priority = base
+    upgraded = False
+    if damage_index > 15:
+        if base == TicketPriority.MEDIUM:
+            priority = TicketPriority.HIGH
+            upgraded = True
+        elif base == TicketPriority.HIGH:
+            priority = TicketPriority.CRITICAL
+            upgraded = True
+        elif base == TicketPriority.CRITICAL:
+            # Stays Critical
+            upgraded = True
+
+    reason_parts = [f"Score {int(round(score))}/100 ({condition_label} condition)."]
+    if upgraded:
+        reason_parts.append(f"Damage Index {damage_index:.1f} exceeds threshold — upgraded to {priority}.")
+    else:
+        reason_parts.append(f"Base priority {priority}.")
+
+    if not has_gps:
+        reason_parts.append("No GPS location provided (retained priority).")
+
+    reason_parts.append(f"{num_defects} defects detected.")
+    priority_reason = " ".join(reason_parts)
+
+    return priority, priority_reason
+
+
+def find_contractor_for_location(db: Session, location_name: Optional[str]) -> Optional[User]:
+    """
+    Finds the active and approved contractor covering a geographic location.
+    Prioritizes area match (e.g. Thane, Katraj, Swarget) then city match (e.g. Mumbai, Pune).
+    """
+    if not location_name:
+        return None
+    from email_service import normalize_location_text, token_matches_location
+    norm_loc = normalize_location_text(location_name)
+    if not norm_loc:
+        return None
+    active_contractors = (
+        db.query(User)
+        .filter(
+            User.role == UserRole.CONTRACTOR,
+            User.is_active == True,
+            User.is_approved == True,
+        )
+        .all()
+    )
+    # 1. Area match
+    area_matches = [
+        c for c in active_contractors
+        if c.service_area and token_matches_location(c.service_area, norm_loc)
+    ]
+    if area_matches:
+        return area_matches[0]
+    # 2. City match
+    city_matches = [
+        c for c in active_contractors
+        if c.service_city and token_matches_location(c.service_city, norm_loc)
+    ]
+    if city_matches:
+        return city_matches[0]
+    return None
+
+
+def _auto_create_ticket(
+    db: Session,
+    analysis: Analysis,
+    current_user: Optional[User] = None,
+) -> Optional[Tuple[MaintenanceTicket, Optional[Dict[str, Any]]]]:
+    """
+    Auto-create a maintenance ticket after analysis if road_health_score <= 60.
+    Returns (ticket, possible_duplicate_dict) or None if score > 60.
+    """
+    if analysis.road_health_score > 60.0:
+        return None
+
+    ticket_id = _generate_ticket_id(db)
+    has_gps = (analysis.latitude is not None and analysis.longitude is not None)
+    num_defects = len(analysis.detections) if isinstance(analysis.detections, list) else 0
+
+    priority, priority_reason = _calculate_priority_and_reason(
+        score=analysis.road_health_score,
+        condition_label=analysis.condition_label,
+        damage_index=analysis.damage_index,
+        has_gps=has_gps,
+        num_defects=num_defects,
+    )
+
+    loc_name = analysis.location_name or "Unknown Location"
+    title = f"{analysis.condition_label} Road Damage — {loc_name}"
+
+    # Auto-match contractor by service area / city
+    matched_contractor = find_contractor_for_location(db, analysis.location_name)
+
+    initial_status = TicketStatus.REPORTED
+    assigned_contractor_id = None
+    suggested_contractor_id = matched_contractor.id if matched_contractor else None
+
+    ticket = MaintenanceTicket(
+        ticket_id=ticket_id,
+        analysis_id=analysis.id,
+        title=title,
+        status=initial_status,
+        priority=priority,
+        priority_reason=priority_reason,
+        road_importance=RoadImportance.UNKNOWN,
+        latitude=analysis.latitude,
+        longitude=analysis.longitude,
+        location_name=analysis.location_name,
+        road_health_score=analysis.road_health_score,
+        condition_label=analysis.condition_label,
+        severity=analysis.severity,
+        assigned_contractor_id=assigned_contractor_id,
+        suggested_contractor_id=suggested_contractor_id,
+        created_at=datetime.now().astimezone(),
+        updated_at=datetime.now().astimezone(),
+    )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+
+    # First TicketStatusHistory entry:
+    uploader_id = current_user.id if current_user else analysis.user_id
+    notes_msg = (
+        f"Auto-created from Analysis #{analysis.id} (Recommended Area Contractor: {matched_contractor.full_name} - {matched_contractor.service_area or matched_contractor.service_city})"
+        if matched_contractor
+        else f"Auto-created from Analysis #{analysis.id}"
+    )
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=uploader_id,
+        changed_at=datetime.now().astimezone(),
+        old_status=None,
+        new_status=initial_status,
+        notes=notes_msg,
+    )
+    db.add(history)
+    db.commit()
+
+    # Feature 5: Duplicate Detection check
+    duplicate_match = check_duplicate_ticket(analysis.latitude, analysis.longitude, db, exclude_ticket_id=ticket.id)
+    possible_dup_info = None
+
+    if duplicate_match:
+        dup_ticket, dist = duplicate_match
+        if dup_ticket.id != ticket.id:
+            ticket.duplicate_of = dup_ticket.id
+            db.commit()
+
+            dup_history = TicketStatusHistory(
+                ticket_id=ticket.id,
+                changed_by=uploader_id,
+                changed_at=datetime.now().astimezone(),
+                old_status=TicketStatus.REPORTED,
+                new_status=TicketStatus.REPORTED,
+                notes=f"Possible duplicate of {dup_ticket.ticket_id} ({int(round(dist))}m away)",
+            )
+            db.add(dup_history)
+            db.commit()
+
+            possible_dup_info = {
+                "ticket_id": dup_ticket.ticket_id,
+                "distance_meters": round(dist, 1),
+            }
+
+    logger.info(f"Created ticket {ticket_id} for analysis #{analysis.id} (priority: {priority})")
+    return ticket, possible_dup_info
+
 
 
 # -----------------------------------------------------------------------------
@@ -897,14 +1213,31 @@ async def analyze_road_image(
         response_dict["user_email"] = current_user.email
         response_dict["user_name"] = current_user.full_name
 
-    # 8. Dispatch Async Email Alert if Damage Detected (Poor, Critical, or Fair with defects)
+    # 8. Auto-create maintenance ticket if road_health_score <= 60
+    response_dict["ticket_id"] = None
+    response_dict["ticket_priority"] = None
+    response_dict["possible_duplicate"] = None
+
+    if analysis_record.road_health_score <= 60.0:
+        try:
+            ticket_res = _auto_create_ticket(db, analysis_record, current_user=current_user)
+            if ticket_res:
+                created_ticket, possible_dup = ticket_res
+                response_dict["ticket_id"] = created_ticket.ticket_id
+                response_dict["ticket_priority"] = created_ticket.priority
+                response_dict["ticket_status"] = created_ticket.status
+                response_dict["possible_duplicate"] = possible_dup
+        except Exception as e:
+            logger.error(f"Auto-ticket creation failed for analysis #{analysis_record.id}: {e}")
+
+    # 9. Dispatch Async Email Alert if Damage Detected (Poor, Critical, or Fair with defects)
     trigger_email_alert_async(
         analysis_data=response_dict,
         annotated_image_path=str(annot_save_path),
         db_session_factory=SessionLocal,
     )
 
-    # 9. Dispatch Async User Confirmation Email for this inspection
+    # 10. Dispatch Async User Confirmation Email for this inspection
     if current_user and current_user.email:
         trigger_submission_confirmation_async(
             user_email=current_user.email,
@@ -1202,7 +1535,32 @@ def get_admin_system_stats(
         analysis_count = db.query(Analysis).filter(Analysis.user_id == c.id).count()
         c_dict = c.to_dict()
         c_dict["analysis_count"] = analysis_count
-        contractors_data.append(c_dict)
+    # Ticket tracking stats
+    now = datetime.now().astimezone()
+    overdue_count = (
+        db.query(MaintenanceTicket)
+        .filter(
+            MaintenanceTicket.deadline.isnot(None),
+            MaintenanceTicket.deadline < now,
+            MaintenanceTicket.status.notin_([TicketStatus.RESOLVED, TicketStatus.REJECTED]),
+        )
+        .count()
+    )
+
+    total_tickets = db.query(MaintenanceTicket).count()
+    by_status = {s: 0 for s in TicketStatus.ALL}
+    for st, count in db.query(MaintenanceTicket.status, func.count(MaintenanceTicket.id)).group_by(MaintenanceTicket.status).all():
+        by_status[st] = count
+
+    by_priority = {p: 0 for p in TicketPriority.ALL}
+    for pr, count in db.query(MaintenanceTicket.priority, func.count(MaintenanceTicket.id)).group_by(MaintenanceTicket.priority).all():
+        by_priority[pr] = count
+
+    ticket_summary = {
+        "total": total_tickets,
+        "by_status": by_status,
+        "by_priority": by_priority,
+    }
 
     return {
         "total_users": total_users,
@@ -1216,6 +1574,8 @@ def get_admin_system_stats(
         "model_info": "YOLOv8n RDD2022 + Cavity Pothole Ensemble (best.pt + pothole_yolo.pt)",
         "pending_contractors": pending_contractors,
         "contractors": contractors_data,
+        "overdue_tickets": overdue_count,
+        "ticket_summary": ticket_summary,
     }
 
 
@@ -1279,6 +1639,100 @@ def get_admin_email_logs(
     """
     logs = db.query(EmailLog).order_by(EmailLog.timestamp.desc()).limit(limit).all()
     return [l.to_dict() for l in logs]
+
+
+from pydantic import BaseModel, EmailStr, Field
+
+
+class TestSmtpPayload(BaseModel):
+    app_password: Optional[str] = None
+    recipient: Optional[str] = None
+
+
+@app.post("/admin/test-smtp")
+def test_smtp_connection_endpoint(
+    payload: TestSmtpPayload,
+    admin: User = Depends(get_current_admin),
+):
+    """
+    Admin diagnostic tool: test live Gmail SMTP connectivity with smtp.gmail.com:587.
+    Optionally accepts a new 16-character Google App Password to test and persist in .env.
+    Sends a test email to the recipient (defaults to kauteshantanu80@gmail.com).
+    """
+    import smtplib
+    from email.message import EmailMessage
+    from email_service import SMTP_SERVER, SMTP_PORT, EMAIL_SENDER
+
+    sender = EMAIL_SENDER or "kauteshantanu80@gmail.com"
+    pw = (payload.app_password or "").strip() or os.getenv("EMAIL_PASSWORD", "").strip()
+    recipient = (payload.recipient or "").strip() or sender
+    env_file = Path(__file__).resolve().parent / ".env"
+
+    if not pw:
+        return {
+            "success": False,
+            "status": "error",
+            "message": "No Gmail App Password provided in request or configured in backend/.env",
+            "hint": "Generate a 16-letter App Password at https://myaccount.google.com/apppasswords (select Mail / Other).",
+        }
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=12) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(sender, pw)
+
+            msg = EmailMessage()
+            msg["Subject"] = "Road Health AI — SMTP Verification & Live Connection Test"
+            msg["From"] = f"Road Health AI <{sender}>"
+            msg["To"] = recipient
+            msg.set_content(
+                f"Hello Admin,\n\n"
+                f"This test email confirms that your Gmail App Password has been successfully verified "
+                f"and is connected to the Road Health AI automated municipal dispatch system.\n\n"
+                f"All future road damage alerts, tickets, and official PDF inspection reports "
+                f"will be delivered directly to your inbox.\n\n"
+                f"— Road Health AI Infrastructure Team"
+            )
+            server.send_message(msg)
+
+        # If a valid password was supplied, persist it into .env!
+        if payload.app_password and env_file.exists():
+            env_text = env_file.read_text(encoding="utf-8")
+            if "EMAIL_PASSWORD=" in env_text:
+                env_text = re.sub(r"EMAIL_PASSWORD=.*", f"EMAIL_PASSWORD={pw}", env_text)
+            else:
+                env_text += f"\nEMAIL_PASSWORD={pw}\n"
+            env_file.write_text(env_text, encoding="utf-8")
+            os.environ["EMAIL_PASSWORD"] = pw
+
+        return {
+            "success": True,
+            "status": "connected",
+            "message": f"SMTP connection successful! Live test email delivered to {recipient}.",
+            "sender": sender,
+            "recipient": recipient,
+        }
+
+    except Exception as exc:
+        err_str = str(exc)
+        hint = (
+            "Google rejected the credentials (535 Bad Credentials). "
+            "To fix: 1. Visit https://myaccount.google.com/apppasswords. "
+            "2. Make sure 2-Step Verification is active. "
+            "3. Generate a new App Password for 'Road Health AI'. "
+            "4. Copy the 16-letter code and save it into backend/.env as EMAIL_PASSWORD."
+        )
+        return {
+            "success": False,
+            "status": "authentication_failed",
+            "error": err_str,
+            "message": "Gmail rejected the App Password.",
+            "hint": hint,
+            "sender": sender,
+            "recipient": recipient,
+        }
 
 
 # -----------------------------------------------------------------------------
@@ -1603,11 +2057,14 @@ def add_contractor_account(
 
 @app.get("/admin/contractors")
 def get_all_contractors(
+    location: Optional[str] = Query(None, description="Optional ticket location to identify matching area contractor"),
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
     """
-    Admin endpoint returning all contractors with id, full_name, email, created_at, is_active, analysis_count.
+    Admin endpoint returning all contractors with id, full_name, email, created_at, is_active, is_approved, analysis_count.
+    If location is supplied, analyzes and scores contractor geographic proximity (Area match, City match, State match)
+    and sorts area-matched contractors to the top for seamless ticket assignment.
     """
     contractors = (
         db.query(User)
@@ -1616,6 +2073,8 @@ def get_all_contractors(
         .all()
     )
     results = []
+    norm_loc = normalize_location_text(location) if location else ""
+
     for c in contractors:
         analysis_count = db.query(Analysis).filter(Analysis.user_id == c.id).count()
         created_str = (
@@ -1623,18 +2082,1048 @@ def get_all_contractors(
             if c.created_at
             else datetime.now().astimezone().isoformat()
         )
+
+        is_area_match = False
+        is_city_match = False
+        is_state_match = False
+        match_tier = 4
+        match_label = None
+
+        if norm_loc:
+            if c.service_area and token_matches_location(c.service_area, norm_loc):
+                is_area_match = True
+                match_tier = 1
+                match_label = f"Area Match ({c.service_area})"
+            elif c.service_city and token_matches_location(c.service_city, norm_loc):
+                is_city_match = True
+                match_tier = 2
+                match_label = f"City Match ({c.service_city})"
+            elif c.service_state and token_matches_location(c.service_state, norm_loc):
+                is_state_match = True
+                match_tier = 3
+                match_label = f"State Match ({c.service_state})"
+
         results.append({
             "id": c.id,
             "full_name": c.full_name,
             "email": c.email,
             "created_at": created_str,
             "is_active": c.is_active,
+            "is_approved": c.is_approved,
             "analysis_count": analysis_count,
             "service_state": c.service_state,
             "service_city": c.service_city,
             "service_area": c.service_area,
+            "is_area_match": is_area_match,
+            "is_city_match": is_city_match,
+            "is_state_match": is_state_match,
+            "match_tier": match_tier,
+            "match_label": match_label,
         })
+
+    if norm_loc:
+        results.sort(key=lambda x: (
+            0 if (x["is_approved"] and x["is_active"]) else (1 if x["is_active"] else 2),
+            x["match_tier"],
+            (x["full_name"] or "").lower(),
+        ))
+
     return results
+
+
+# =============================================================================
+# FEATURE 7: ROAD MAINTENANCE MANAGEMENT SYSTEM
+# =============================================================================
+
+# --- 7.0: Overdue Warning Email Trigger Helper ---
+def _check_and_notify_overdue_tickets(db: Session):
+    """
+    Checks for overdue tickets (deadline passed, status Assigned or In Progress)
+    and sends a one-time overdue warning email to the assigned contractor.
+    """
+    now = datetime.now().astimezone()
+    overdue_tickets = (
+        db.query(MaintenanceTicket)
+        .filter(
+            MaintenanceTicket.deadline.isnot(None),
+            MaintenanceTicket.deadline < now,
+            MaintenanceTicket.status.in_([TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS]),
+            MaintenanceTicket.is_overdue_notified == False,
+        )
+        .all()
+    )
+
+    for t in overdue_tickets:
+        if t.assigned_contractor and t.assigned_contractor.email:
+            dl_tz = t.deadline if t.deadline.tzinfo else t.deadline.astimezone()
+            days_overdue = max(1, int((now - dl_tz).total_seconds() / 86400))
+            deadline_str = dl_tz.strftime("%Y-%m-%d %H:%M")
+            send_overdue_warning_email(
+                contractor_email=t.assigned_contractor.email,
+                contractor_name=t.assigned_contractor.full_name or "Contractor",
+                ticket_id=t.ticket_id,
+                title=t.title,
+                original_deadline=deadline_str,
+                days_overdue=days_overdue,
+                db_session_factory=SessionLocal,
+            )
+        t.is_overdue_notified = True
+
+    if overdue_tickets:
+        db.commit()
+
+
+# --- 7.1: List / Filter Tickets ---
+@app.get("/tickets", response_model=List[TicketResponse])
+def list_tickets(
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    priority: Optional[str] = Query(None, description="Filter by priority"),
+    location: Optional[str] = Query(None, description="Filter by location keyword"),
+    date_from: Optional[str] = Query(None, description="Filter created >= date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter created <= date (YYYY-MM-DD)"),
+    contractor_id: Optional[int] = Query(None, description="Filter by assigned contractor ID"),
+    overdue_only: Optional[bool] = Query(False, description="Filter only overdue tickets"),
+    assigned_to_me: Optional[bool] = Query(None, description="Show only tickets assigned to current user"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    List maintenance tickets with role-based filtering:
+    - Admin: all tickets with full details
+    - Contractor: only tickets assigned to them
+    - User: only tickets created from their analyses
+    Also automatically checks and dispatches overdue warning emails once per overdue ticket.
+    """
+    # Trigger overdue notifications check on tickets list access
+    try:
+        _check_and_notify_overdue_tickets(db)
+    except Exception as e:
+        logger.error(f"Error checking overdue notifications: {e}")
+
+    query = db.query(MaintenanceTicket).order_by(MaintenanceTicket.created_at.desc())
+
+    # Role-based access filtering
+    if current_user.role == UserRole.USER:
+        user_analysis_ids = [a.id for a in db.query(Analysis.id).filter(Analysis.user_id == current_user.id).all()]
+        query = query.filter(MaintenanceTicket.analysis_id.in_(user_analysis_ids))
+    elif current_user.role == UserRole.CONTRACTOR:
+        query = query.filter(MaintenanceTicket.assigned_contractor_id == current_user.id)
+    # Admin sees all
+
+    # Optional query filters
+    if status_filter:
+        query = query.filter(MaintenanceTicket.status == status_filter)
+    if priority:
+        query = query.filter(MaintenanceTicket.priority == priority)
+    if location:
+        query = query.filter(MaintenanceTicket.location_name.ilike(f"%{location.strip()}%"))
+    if contractor_id:
+        query = query.filter(MaintenanceTicket.assigned_contractor_id == contractor_id)
+    if date_from:
+        try:
+            df = datetime.fromisoformat(date_from)
+            query = query.filter(MaintenanceTicket.created_at >= df)
+        except Exception:
+            pass
+    if date_to:
+        try:
+            dt = datetime.fromisoformat(date_to)
+            query = query.filter(MaintenanceTicket.created_at <= dt)
+        except Exception:
+            pass
+    if overdue_only:
+        now = datetime.now().astimezone()
+        query = query.filter(
+            MaintenanceTicket.deadline.isnot(None),
+            MaintenanceTicket.deadline < now,
+            MaintenanceTicket.status != TicketStatus.RESOLVED,
+        )
+
+    tickets = query.offset(offset).limit(limit).all()
+    return [t.to_dict() for t in tickets]
+
+
+def _lookup_ticket(ticket_id: str, db: Session) -> Optional[MaintenanceTicket]:
+    """
+    Robust lookup for MaintenanceTicket by string ticket_id (with or without dashes/spaces)
+    or database integer ID.
+    """
+    clean_id = str(ticket_id).strip()
+    alt_id = clean_id.replace(" ", "-")
+    alt_id_rev = clean_id.replace("-", " ")
+    ticket = db.query(MaintenanceTicket).filter(
+        (MaintenanceTicket.ticket_id == clean_id) |
+        (MaintenanceTicket.ticket_id == alt_id) |
+        (MaintenanceTicket.ticket_id == alt_id_rev)
+    ).first()
+    if not ticket:
+        try:
+            tid = int(clean_id)
+            ticket = db.query(MaintenanceTicket).filter(MaintenanceTicket.id == tid).first()
+        except (ValueError, TypeError):
+            pass
+    return ticket
+
+
+# --- 7.2: Get Single Ticket Detail ---
+@app.get("/tickets/{ticket_id}")
+def get_ticket_detail(
+    ticket_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Get detailed ticket information including analysis data, status history,
+    repair submissions, before image, and after image.
+    ticket_id can be string (RH-2026-0001) or integer database ID.
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    # Access control
+    if current_user.role == UserRole.USER:
+        analysis = db.query(Analysis).filter(Analysis.id == ticket.analysis_id).first()
+        if analysis and analysis.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="You do not have permission to view this ticket.")
+    elif current_user.role == UserRole.CONTRACTOR:
+        if ticket.assigned_contractor_id != current_user.id:
+            raise HTTPException(status_code=403, detail="You do not have permission to view this ticket.")
+
+    ticket_dict = ticket.to_dict()
+    if not ticket_dict.get("suggested_contractor_id") and ticket.location_name:
+        matched = find_contractor_for_location(db, ticket.location_name)
+        if matched:
+            ticket_dict["suggested_contractor_id"] = matched.id
+            ticket_dict["suggested_contractor_name"] = matched.full_name
+            ticket_dict["suggested_contractor_email"] = matched.email
+            ticket_dict["suggested_contractor_area"] = matched.service_area
+            ticket_dict["suggested_contractor_city"] = matched.service_city
+
+    history = [h.to_dict() for h in ticket.status_history]
+    submissions = [s.to_dict() for s in ticket.repair_submissions]
+
+    analysis_data = None
+    before_image_url = None
+    if ticket.analysis:
+        analysis_data = _format_analysis_response(ticket.analysis, include_user_info=(current_user.role == UserRole.ADMIN))
+        before_image_url = ticket.analysis.annotated_image_path or ticket.analysis.original_image_path
+
+    after_image_url = None
+    if submissions:
+        after_image_url = submissions[0].get("after_image_path")
+
+    return {
+        "ticket": ticket_dict,
+        "status_history": history,
+        "repair_submissions": submissions,
+        "analysis": analysis_data,
+        "before_image_url": before_image_url,
+        "after_image_url": after_image_url,
+    }
+
+
+# --- 7.3: Verify Ticket (Admin only) ---
+@app.post("/tickets/{ticket_id}/verify")
+def verify_ticket(
+    ticket_id: str,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin verifies a ticket:
+    - Changes status Reported -> Verified
+    - Adds TicketStatusHistory entry
+    - Returns updated ticket
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    old_status = ticket.status
+    ticket.status = TicketStatus.VERIFIED
+    ticket.updated_at = datetime.now().astimezone()
+
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=admin.id,
+        changed_at=datetime.now().astimezone(),
+        old_status=old_status,
+        new_status=TicketStatus.VERIFIED,
+        notes="Ticket verified by administrator",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(ticket)
+
+    return ticket.to_dict()
+
+
+# --- 7.4: Assign Ticket to Contractor (Admin only) ---
+@app.post("/tickets/{ticket_id}/assign")
+def assign_ticket(
+    ticket_id: str,
+    payload: TicketAssignRequest,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin assigns ticket to contractor:
+    - Changes status Verified -> Assigned (or Reported -> Assigned)
+    - Sets assigned_contractor_id, deadline, road_importance
+    - Adds TicketStatusHistory entry
+    - Sends email to assigned contractor
+    - Returns updated ticket
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    contractor = db.query(User).filter(User.id == payload.contractor_id, User.role == UserRole.CONTRACTOR).first()
+    if not contractor:
+        raise HTTPException(status_code=404, detail="Contractor not found or user is not a contractor.")
+
+    old_status = ticket.status
+    ticket.assigned_contractor_id = contractor.id
+    ticket.status = TicketStatus.ASSIGNED
+    ticket.updated_at = datetime.now().astimezone()
+
+    if payload.road_importance:
+        ticket.road_importance = payload.road_importance
+
+    # Set deadline
+    deadline_val = None
+    if payload.deadline:
+        try:
+            clean_dl = payload.deadline.strip()
+            if len(clean_dl) == 10 and "-" in clean_dl:
+                deadline_val = datetime.strptime(clean_dl, "%Y-%m-%d").astimezone()
+            else:
+                deadline_val = datetime.fromisoformat(clean_dl.replace("Z", "+00:00"))
+            ticket.deadline = deadline_val
+        except Exception as de:
+            logging.warning(f"Failed to parse deadline '{payload.deadline}': {de}")
+    elif payload.deadline_days:
+        deadline_val = datetime.now().astimezone() + timedelta(days=payload.deadline_days)
+        ticket.deadline = deadline_val
+
+    # Reset overdue notification flag for new assignment
+    ticket.is_overdue_notified = False
+
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=admin.id,
+        changed_at=datetime.now().astimezone(),
+        old_status=old_status,
+        new_status=TicketStatus.ASSIGNED,
+        notes=payload.notes or f"Assigned to {contractor.full_name} ({contractor.email})"
+              + (f", deadline: {ticket.deadline.strftime('%Y-%m-%d')}" if ticket.deadline else ""),
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(ticket)
+
+    deadline_str = ticket.deadline.strftime("%d %b %Y, %I:%M %p") if ticket.deadline else "Not specified"
+
+    # 1. Send contractor work order email
+    try:
+        send_ticket_assigned_email(
+            contractor_email=contractor.email,
+            contractor_name=contractor.full_name or "Contractor",
+            ticket_id=ticket.ticket_id,
+            title=ticket.title,
+            priority=ticket.priority,
+            deadline=deadline_str,
+            location=ticket.location_name or "Unknown Location",
+            road_importance=ticket.road_importance or "Standard Road",
+            notes=payload.notes or "",
+            analysis_id=ticket.analysis_id,
+            db_session_factory=SessionLocal,
+        )
+    except Exception as e:
+        logging.error(f"Failed to trigger contractor ticket assignment email: {e}")
+
+    # 2. Send reporting citizen email update
+    try:
+        reporter_email = None
+        reporter_name = "Citizen"
+        if ticket.analysis and ticket.analysis.user:
+            reporter_email = ticket.analysis.user.email
+            reporter_name = ticket.analysis.user.full_name or "Citizen"
+
+        if reporter_email and reporter_email != contractor.email:
+            send_ticket_assigned_user_email(
+                user_email=reporter_email,
+                user_name=reporter_name,
+                ticket_id=ticket.ticket_id,
+                title=ticket.title,
+                contractor_name=contractor.full_name or "Contractor",
+                contractor_area=contractor.service_area or contractor.service_city or "Assigned Contractor",
+                deadline=deadline_str,
+                location=ticket.location_name or "Unknown Location",
+                db_session_factory=SessionLocal,
+            )
+    except Exception as ue:
+        logging.error(f"Failed to trigger user ticket assignment email: {ue}")
+
+    return ticket.to_dict()
+
+
+# --- 7.5: Contractor Starts Work ---
+@app.post("/tickets/{ticket_id}/start")
+def start_ticket_work(
+    ticket_id: str,
+    payload: Optional[TicketStatusUpdate] = None,
+    current_user: User = Depends(get_current_contractor_or_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Contractor confirms starting work:
+    - Changes status Assigned -> In Progress
+    - Adds TicketStatusHistory entry
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    if current_user.role == UserRole.CONTRACTOR and ticket.assigned_contractor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="This ticket is not assigned to you.")
+
+    if ticket.status not in [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS]:
+        raise HTTPException(status_code=400, detail=f"Cannot start work on ticket with status '{ticket.status}'.")
+
+    old_status = ticket.status
+    ticket.status = TicketStatus.IN_PROGRESS
+    ticket.updated_at = datetime.now().astimezone()
+
+    note_text = payload.notes or payload.comment if payload else "Contractor commenced repair work on site"
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=current_user.id,
+        changed_at=datetime.now().astimezone(),
+        old_status=old_status,
+        new_status=TicketStatus.IN_PROGRESS,
+        notes=note_text or "Work started",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(ticket)
+
+    return ticket.to_dict()
+
+
+# --- 7.6: Reopen Ticket (Admin only) ---
+@app.post("/tickets/{ticket_id}/reopen")
+def reopen_ticket(
+    ticket_id: str,
+    payload: Optional[TicketReopenRequest] = None,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin reopens a rejected ticket:
+    - Changes status Rejected -> Reported
+    - Body: {notes}
+    - Adds TicketStatusHistory entry
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    old_status = ticket.status
+    ticket.status = TicketStatus.REPORTED
+    ticket.updated_at = datetime.now().astimezone()
+
+    note_text = payload.notes if payload and payload.notes else "Ticket reopened by administrator"
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=admin.id,
+        changed_at=datetime.now().astimezone(),
+        old_status=old_status,
+        new_status=TicketStatus.REPORTED,
+        notes=note_text,
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(ticket)
+
+    return ticket.to_dict()
+
+
+# --- 7.7: Submit Repair (Contractor only) ---
+@app.post("/tickets/{ticket_id}/submit-repair")
+async def submit_repair(
+    ticket_id: str,
+    notes: Optional[str] = Form(None),
+    after_image: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_contractor_or_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Contractor submits repair proof:
+    - Contractor uploads after-repair photo + notes
+    - Validates: contractor must be assigned to this ticket
+    - Validates: status must be In Progress or Assigned
+    - Saves image to backend/static/repairs/{ticket_id}_after.jpg
+    - Creates RepairSubmission record with status='Pending'
+    - Changes ticket status: In Progress -> Repair Submitted
+    - Adds TicketStatusHistory entry
+    - Sends email to admin
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    if current_user.role == UserRole.CONTRACTOR and ticket.assigned_contractor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="This ticket is not assigned to you.")
+
+    if ticket.status not in [TicketStatus.IN_PROGRESS, TicketStatus.ASSIGNED]:
+        raise HTTPException(status_code=400, detail=f"Cannot submit repair for ticket with status '{ticket.status}'.")
+
+    # Save after image to backend/static/repairs/{ticket_id}_after.jpg
+    REPAIR_DIR = STATIC_DIR / "repairs"
+    REPAIR_DIR.mkdir(parents=True, exist_ok=True)
+
+    after_path = None
+    if after_image and after_image.filename:
+        ext = Path(after_image.filename).suffix.lower() or ".jpg"
+        clean_tid = ticket.ticket_id.replace("/", "_").replace("\\", "_")
+        after_filename = f"{clean_tid}_after{ext}"
+        after_save = REPAIR_DIR / after_filename
+        with open(after_save, "wb") as buf:
+            shutil.copyfileobj(after_image.file, buf)
+        after_path = f"static/repairs/{after_filename}"
+
+    submission = RepairSubmission(
+        ticket_id=ticket.id,
+        submitted_by=current_user.id,
+        submitted_at=datetime.now().astimezone(),
+        after_image_path=after_path,
+        notes=notes,
+        status=RepairStatus.PENDING,
+    )
+    db.add(submission)
+
+    old_status = ticket.status
+    ticket.status = TicketStatus.REPAIR_SUBMITTED
+    ticket.updated_at = datetime.now().astimezone()
+
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=current_user.id,
+        changed_at=datetime.now().astimezone(),
+        old_status=old_status,
+        new_status=TicketStatus.REPAIR_SUBMITTED,
+        notes=f"Repair submitted by contractor {current_user.full_name}: {notes or 'No notes provided'}",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(submission)
+    db.refresh(ticket)
+
+    # Send email to admin
+    try:
+        before_path = ticket.analysis.annotated_image_path if ticket.analysis else None
+        send_repair_submitted_admin_email(
+            ticket_id=ticket.ticket_id,
+            title=ticket.title,
+            contractor_name=current_user.full_name or "Contractor",
+            contractor_notes=notes or "No notes",
+            before_image_path=before_path,
+            after_image_path=after_path,
+            db_session_factory=SessionLocal,
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify admin of repair submission: {e}")
+
+    return {
+        "status": "Repair Submitted",
+        "ticket": ticket.to_dict(),
+        "submission": submission.to_dict(),
+    }
+
+
+# --- 7.8: Approve Repair (Admin only) ---
+@app.post("/tickets/{ticket_id}/approve-repair")
+def approve_repair(
+    ticket_id: str,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin approves repair:
+    - Validates: RepairSubmission exists with status="Pending"
+    - Changes RepairSubmission status -> Approved
+    - Changes ticket status -> Resolved
+    - Sets reviewed_by, reviewed_at
+    - Adds TicketStatusHistory entry
+    - Sends email to contractor
+    - Sends email to original reporting user
+    - Returns updated ticket
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    latest_submission = (
+        db.query(RepairSubmission)
+        .filter(RepairSubmission.ticket_id == ticket.id, RepairSubmission.status == RepairStatus.PENDING)
+        .order_by(RepairSubmission.submitted_at.desc())
+        .first()
+    )
+
+    if not latest_submission:
+        raise HTTPException(status_code=400, detail="No pending repair submission found for this ticket.")
+
+    now = datetime.now().astimezone()
+    latest_submission.status = RepairStatus.APPROVED
+    latest_submission.reviewed_by = admin.id
+    latest_submission.reviewed_at = now
+
+    old_status = ticket.status
+    ticket.status = TicketStatus.RESOLVED
+    ticket.updated_at = now
+
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=admin.id,
+        changed_at=now,
+        old_status=old_status,
+        new_status=TicketStatus.RESOLVED,
+        notes="Repair approved and verified by administrator",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(ticket)
+
+    # 1. Email to contractor
+    try:
+        if ticket.assigned_contractor and ticket.assigned_contractor.email:
+            send_repair_approved_contractor_email(
+                contractor_email=ticket.assigned_contractor.email,
+                contractor_name=ticket.assigned_contractor.full_name or "Contractor",
+                ticket_id=ticket.ticket_id,
+                title=ticket.title,
+                db_session_factory=SessionLocal,
+            )
+    except Exception as e:
+        logger.error(f"Failed to send repair approval email to contractor: {e}")
+
+    # 2. Email to original user who reported it
+    try:
+        if ticket.analysis and ticket.analysis.user and ticket.analysis.user.email:
+            send_repair_approved_user_email(
+                user_email=ticket.analysis.user.email,
+                user_name=ticket.analysis.user.full_name or "Citizen Reporter",
+                ticket_id=ticket.ticket_id,
+                title=ticket.title,
+                location=ticket.location_name or "Reported location",
+                db_session_factory=SessionLocal,
+            )
+    except Exception as e:
+        logger.error(f"Failed to send repair completion email to reporting user: {e}")
+
+    return ticket.to_dict()
+
+
+# --- 7.9: Reject Repair (Admin only) ---
+@app.post("/tickets/{ticket_id}/reject-repair")
+def reject_repair(
+    ticket_id: str,
+    payload: RepairRejectRequest,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin rejects repair:
+    - Body: {rejection_reason}
+    - Changes RepairSubmission status -> Rejected
+    - Changes ticket status -> In Progress (contractor must resubmit)
+    - Sets rejection_reason, reviewed_by, reviewed_at
+    - Adds TicketStatusHistory entry
+    - Sends email to contractor with instructions to resubmit
+    """
+    ticket = _lookup_ticket(ticket_id, db)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found.")
+
+    latest_submission = (
+        db.query(RepairSubmission)
+        .filter(RepairSubmission.ticket_id == ticket.id, RepairSubmission.status == RepairStatus.PENDING)
+        .order_by(RepairSubmission.submitted_at.desc())
+        .first()
+    )
+
+    if not latest_submission:
+        raise HTTPException(status_code=400, detail="No pending repair submission found for this ticket.")
+
+    now = datetime.now().astimezone()
+    latest_submission.status = RepairStatus.REJECTED
+    latest_submission.rejection_reason = payload.rejection_reason
+    latest_submission.reviewed_by = admin.id
+    latest_submission.reviewed_at = now
+
+    old_status = ticket.status
+    ticket.status = TicketStatus.IN_PROGRESS
+    ticket.updated_at = now
+
+    history = TicketStatusHistory(
+        ticket_id=ticket.id,
+        changed_by=admin.id,
+        changed_at=now,
+        old_status=old_status,
+        new_status=TicketStatus.IN_PROGRESS,
+        notes=f"Repair rejected: {payload.rejection_reason}",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(ticket)
+
+    # Email to contractor
+    try:
+        if ticket.assigned_contractor and ticket.assigned_contractor.email:
+            send_repair_rejected_contractor_email(
+                contractor_email=ticket.assigned_contractor.email,
+                contractor_name=ticket.assigned_contractor.full_name or "Contractor",
+                ticket_id=ticket.ticket_id,
+                title=ticket.title,
+                rejection_reason=payload.rejection_reason,
+                db_session_factory=SessionLocal,
+            )
+    except Exception as e:
+        logger.error(f"Failed to send repair rejection email to contractor: {e}")
+
+    return ticket.to_dict()
+
+
+# --- 7.10: Merge Duplicate Tickets (Admin only) ---
+@app.post("/tickets/{ticket_id}/merge")
+def merge_ticket_into(
+    ticket_id: str,
+    payload: TicketMergeRequest,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin merges a ticket into a target duplicate ticket:
+    - Marks current ticket as duplicate_of target ticket
+    - Changes status to Rejected with note 'Merged into {target_id}'
+    - Adds TicketStatusHistory entry
+    """
+    source = db.query(MaintenanceTicket).filter(MaintenanceTicket.ticket_id == ticket_id).first()
+    if not source:
+        try:
+            tid = int(ticket_id)
+            source = db.query(MaintenanceTicket).filter(MaintenanceTicket.id == tid).first()
+        except (ValueError, TypeError):
+            pass
+
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Source ticket '{ticket_id}' not found.")
+
+    target_id_str = payload.merge_into_ticket_id or payload.target_ticket_id
+    if not target_id_str:
+        raise HTTPException(status_code=400, detail="Target ticket ID must be provided.")
+
+    target = db.query(MaintenanceTicket).filter(MaintenanceTicket.ticket_id == target_id_str).first()
+    if not target:
+        try:
+            tid = int(target_id_str)
+            target = db.query(MaintenanceTicket).filter(MaintenanceTicket.id == tid).first()
+        except (ValueError, TypeError):
+            pass
+
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Target ticket '{target_id_str}' not found.")
+
+    if source.id == target.id:
+        raise HTTPException(status_code=400, detail="Cannot merge a ticket into itself.")
+
+    old_status = source.status
+    source.status = TicketStatus.REJECTED
+    source.duplicate_of = target.id
+    source.updated_at = datetime.now().astimezone()
+
+    reason_text = f"Merged into {target.ticket_id}" + (f". Reason: {payload.reason}" if payload.reason else "")
+    history = TicketStatusHistory(
+        ticket_id=source.id,
+        changed_by=admin.id,
+        changed_at=datetime.now().astimezone(),
+        old_status=old_status,
+        new_status=TicketStatus.REJECTED,
+        notes=reason_text,
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(source)
+
+    return source.to_dict()
+
+
+@app.post("/tickets/merge")
+def merge_tickets_general(
+    payload: TicketMergeRequest,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """General merge endpoint alias accepting source and target in body."""
+    source_id_str = payload.source_ticket_id
+    target_id_str = payload.merge_into_ticket_id or payload.target_ticket_id
+    if not source_id_str or not target_id_str:
+        raise HTTPException(status_code=400, detail="Both source_ticket_id and target_ticket_id must be provided.")
+
+    return merge_ticket_into(source_id_str, payload, admin, db)
+
+
+# --- 7.11: Overdue Tickets (Admin only) ---
+@app.get("/admin/tickets/overdue")
+@app.get("/maintenance/overdue")
+def get_overdue_tickets_admin(
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all overdue tickets with contractor info and days overdue.
+    """
+    now = datetime.now().astimezone()
+    overdue = (
+        db.query(MaintenanceTicket)
+        .filter(
+            MaintenanceTicket.deadline.isnot(None),
+            MaintenanceTicket.deadline < now,
+            MaintenanceTicket.status.notin_([TicketStatus.RESOLVED, TicketStatus.REJECTED]),
+        )
+        .order_by(MaintenanceTicket.deadline.asc())
+        .all()
+    )
+
+    results = []
+    for t in overdue:
+        td = t.to_dict()
+        dl = t.deadline if t.deadline.tzinfo else t.deadline.astimezone()
+        days_od = max(1, int((now - dl).total_seconds() / 86400))
+        td["days_overdue"] = days_od
+        results.append(td)
+
+    return results
+
+
+# --- 7.12: Management Dashboard Summary (Admin only) ---
+@app.get("/admin/tickets/summary", response_model=MaintenanceSummaryResponse)
+@app.get("/maintenance/summary", response_model=MaintenanceSummaryResponse)
+def get_admin_ticket_summary(
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin Ticket Management Summary:
+    - total_tickets, open_tickets, resolved_tickets, overdue_tickets, high_priority_tickets
+    - tickets_by_status
+    - tickets_by_priority
+    - tickets_created_vs_resolved (last 30 days daily counts)
+    - top_locations (top 5 locations by ticket count)
+    - avg_resolution_time_hours
+    """
+    now = datetime.now().astimezone()
+
+    total = db.query(MaintenanceTicket).count()
+    resolved = db.query(MaintenanceTicket).filter(MaintenanceTicket.status == TicketStatus.RESOLVED).count()
+    rejected = db.query(MaintenanceTicket).filter(MaintenanceTicket.status == TicketStatus.REJECTED).count()
+    open_tickets = total - resolved - rejected
+
+    overdue = (
+        db.query(MaintenanceTicket)
+        .filter(
+            MaintenanceTicket.deadline.isnot(None),
+            MaintenanceTicket.deadline < now,
+            MaintenanceTicket.status.notin_([TicketStatus.RESOLVED, TicketStatus.REJECTED]),
+        )
+        .count()
+    )
+
+    high_priority = (
+        db.query(MaintenanceTicket)
+        .filter(MaintenanceTicket.priority.in_([TicketPriority.CRITICAL, TicketPriority.HIGH]))
+        .count()
+    )
+
+    by_status = {s: 0 for s in TicketStatus.ALL}
+    for st, count in db.query(MaintenanceTicket.status, func.count(MaintenanceTicket.id)).group_by(MaintenanceTicket.status).all():
+        by_status[st] = count
+
+    by_priority = {p: 0 for p in TicketPriority.ALL}
+    for pr, count in db.query(MaintenanceTicket.priority, func.count(MaintenanceTicket.id)).group_by(MaintenanceTicket.priority).all():
+        by_priority[pr] = count
+
+    # Trend: last 30 days created vs resolved
+    trend = []
+    for d in range(29, -1, -1):
+        day_date = (now - timedelta(days=d)).date()
+        day_start = datetime.combine(day_date, datetime.min.time()).astimezone()
+        day_end = datetime.combine(day_date, datetime.max.time()).astimezone()
+
+        created_cnt = (
+            db.query(MaintenanceTicket)
+            .filter(MaintenanceTicket.created_at >= day_start, MaintenanceTicket.created_at <= day_end)
+            .count()
+        )
+        resolved_cnt = (
+            db.query(MaintenanceTicket)
+            .filter(
+                MaintenanceTicket.status == TicketStatus.RESOLVED,
+                MaintenanceTicket.updated_at >= day_start,
+                MaintenanceTicket.updated_at <= day_end,
+            )
+            .count()
+        )
+        trend.append({
+            "date": day_date.strftime("%b %d"),
+            "created": created_cnt,
+            "resolved": resolved_cnt,
+        })
+
+    # Top 5 locations
+    top_locs_query = (
+        db.query(MaintenanceTicket.location_name, func.count(MaintenanceTicket.id))
+        .filter(MaintenanceTicket.location_name.isnot(None), MaintenanceTicket.location_name != "")
+        .group_by(MaintenanceTicket.location_name)
+        .order_by(func.count(MaintenanceTicket.id).desc())
+        .limit(5)
+        .all()
+    )
+    top_locations = [{"location": loc or "Unknown", "count": cnt} for loc, cnt in top_locs_query]
+
+    # Average resolution time in hours
+    resolved_tickets = (
+        db.query(MaintenanceTicket)
+        .filter(MaintenanceTicket.status == TicketStatus.RESOLVED)
+        .all()
+    )
+    avg_hours = None
+    if resolved_tickets:
+        total_seconds = 0.0
+        valid_cnt = 0
+        for t in resolved_tickets:
+            if t.created_at and t.updated_at:
+                c_tz = t.created_at if t.created_at.tzinfo else t.created_at.astimezone()
+                u_tz = t.updated_at if t.updated_at.tzinfo else t.updated_at.astimezone()
+                diff = (u_tz - c_tz).total_seconds()
+                if diff >= 0:
+                    total_seconds += diff
+                    valid_cnt += 1
+        if valid_cnt > 0:
+            avg_hours = round(total_seconds / (valid_cnt * 3600.0), 1)
+
+    return {
+        "total_tickets": total,
+        "open_tickets": open_tickets,
+        "resolved_tickets": resolved,
+        "overdue_tickets": overdue,
+        "high_priority_tickets": high_priority,
+        "tickets_by_status": by_status,
+        "tickets_by_priority": by_priority,
+        "tickets_created_vs_resolved": trend,
+        "top_locations": top_locations,
+        "avg_resolution_time_hours": avg_hours,
+    }
+
+
+# --- 7.13: Export Tickets CSV (Admin only) ---
+@app.get("/admin/tickets/export-csv")
+@app.get("/maintenance/export-csv")
+def export_tickets_csv(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    priority: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    contractor_id: Optional[int] = Query(None),
+    overdue_only: Optional[bool] = Query(False),
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Exports maintenance tickets as a CSV file:
+    Columns: ticket_id, title, status, priority, location, score, severity,
+             created_at, deadline, assigned_contractor, resolved_at, days_to_resolve
+    """
+    query = db.query(MaintenanceTicket).order_by(MaintenanceTicket.created_at.desc())
+
+    if status_filter:
+        query = query.filter(MaintenanceTicket.status == status_filter)
+    if priority:
+        query = query.filter(MaintenanceTicket.priority == priority)
+    if location:
+        query = query.filter(MaintenanceTicket.location_name.ilike(f"%{location.strip()}%"))
+    if contractor_id:
+        query = query.filter(MaintenanceTicket.assigned_contractor_id == contractor_id)
+    if date_from:
+        try:
+            df = datetime.fromisoformat(date_from)
+            query = query.filter(MaintenanceTicket.created_at >= df)
+        except Exception:
+            pass
+    if date_to:
+        try:
+            dt = datetime.fromisoformat(date_to)
+            query = query.filter(MaintenanceTicket.created_at <= dt)
+        except Exception:
+            pass
+    if overdue_only:
+        now = datetime.now().astimezone()
+        query = query.filter(
+            MaintenanceTicket.deadline.isnot(None),
+            MaintenanceTicket.deadline < now,
+            MaintenanceTicket.status != TicketStatus.RESOLVED,
+        )
+
+    tickets = query.all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "ticket_id", "title", "status", "priority", "location", "score", "severity",
+        "created_at", "deadline", "assigned_contractor", "resolved_at", "days_to_resolve",
+    ])
+
+    for t in tickets:
+        contractor_name = t.assigned_contractor.full_name if t.assigned_contractor else ""
+        deadline_str = t.deadline.strftime("%Y-%m-%d %H:%M") if t.deadline else ""
+        created_str = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else ""
+
+        resolved_at_str = ""
+        days_to_resolve = ""
+        if t.status == TicketStatus.RESOLVED and t.updated_at:
+            resolved_at_str = t.updated_at.strftime("%Y-%m-%d %H:%M")
+            if t.created_at:
+                c_tz = t.created_at if t.created_at.tzinfo else t.created_at.astimezone()
+                u_tz = t.updated_at if t.updated_at.tzinfo else t.updated_at.astimezone()
+                diff_days = round((u_tz - c_tz).total_seconds() / 86400.0, 1)
+                days_to_resolve = str(diff_days)
+
+        writer.writerow([
+            t.ticket_id,
+            t.title,
+            t.status,
+            t.priority,
+            t.location_name or "",
+            t.road_health_score if t.road_health_score is not None else "",
+            t.severity or "",
+            created_str,
+            deadline_str,
+            contractor_name,
+            resolved_at_str,
+            days_to_resolve,
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="tickets_export.csv"'},
+    )
 
 
 if __name__ == "__main__":

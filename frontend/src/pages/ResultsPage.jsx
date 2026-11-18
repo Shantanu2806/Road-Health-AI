@@ -201,11 +201,32 @@ export default function ResultsPage() {
             </button>
           )}
 
-          <span className="text-xs text-slate-500 dark:text-slate-400 font-mono font-bold px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-            ID #{analysis.id}
-          </span>
         </div>
       </div>
+
+      {/* Auto-created Maintenance Ticket Green Banner */}
+      {analysis.ticket_id && (
+        <div className="mb-6 p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg shadow-emerald-500/5 transition-all">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl flex-shrink-0">🎫</span>
+            <div>
+              <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">
+                Maintenance Ticket <span className="font-mono font-bold text-emerald-900 dark:text-emerald-200">{analysis.ticket_id}</span> has been automatically created with <span className="font-bold">{analysis.ticket_priority || "Medium"}</span> priority. Authorities have been notified.
+              </p>
+              <p className="text-xs text-emerald-700/80 dark:text-emerald-400/80 mt-0.5">
+                Automated road maintenance workflow initiated. Track contractor assignment, repair progress, and verification status.
+              </p>
+            </div>
+          </div>
+          <Link
+            to={`/tickets/${analysis.ticket_id}`}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/20 transition-all whitespace-nowrap self-end sm:self-auto"
+          >
+            <span>View Ticket</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      )}
 
       {/* Main Grid: Left = Visualizer / Compare Slider, Right = Metrics Panel */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

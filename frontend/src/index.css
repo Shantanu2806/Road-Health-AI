@@ -83,32 +83,350 @@
 /* Ultra-Smooth Low-CPU Mesh Ambient Float Animations */
 @keyframes ambientDrift {
   0% {
-    transform: translate(0px, 0px) scale(1);
+    transform: translate(0px, 0px) scale(1) rotate(0deg);
   }
-  50% {
-    transform: translate(30px, 20px) scale(1.05);
+  33% {
+    transform: translate(40px, 30px) scale(1.1) rotate(4deg);
+  }
+  66% {
+    transform: translate(-30px, 45px) scale(0.95) rotate(-3deg);
   }
   100% {
-    transform: translate(-20px, 15px) scale(0.98);
+    transform: translate(25px, -20px) scale(1.05) rotate(2deg);
   }
 }
 
 @keyframes ambientDriftReverse {
   0% {
-    transform: translate(0px, 0px) scale(1);
+    transform: translate(0px, 0px) scale(1) rotate(0deg);
   }
-  50% {
-    transform: translate(-30px, -15px) scale(1.04);
+  33% {
+    transform: translate(-45px, -25px) scale(1.08) rotate(-4deg);
+  }
+  66% {
+    transform: translate(35px, -35px) scale(0.94) rotate(3deg);
   }
   100% {
-    transform: translate(25px, -20px) scale(0.96);
+    transform: translate(-20px, 25px) scale(1.02) rotate(-2deg);
+  }
+}
+
+/* Continuous Highway / Grid Matrix Flow Animation */
+@keyframes roadMatrixFlow {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 0 60px;
+  }
+}
+
+/* Floating Particle Drift */
+@keyframes floatParticle {
+  0% {
+    transform: translateY(0px) scale(0.8);
+    opacity: 0.3;
+  }
+  50% {
+    transform: translateY(-40px) scale(1.2);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translateY(-80px) scale(0.8);
+    opacity: 0.3;
+  }
+}
+
+/* Diagonal Laser Pulse Sweep */
+@keyframes diagonalSweep {
+  0% {
+    transform: translateX(-100%) translateY(-100%) rotate(45deg);
+    opacity: 0;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: translateX(200%) translateY(200%) rotate(45deg);
+    opacity: 0;
   }
 }
 
 .animate-ambient-slow {
-  animation: ambientDrift 18s ease-in-out infinite alternate;
+  animation: ambientDrift 14s ease-in-out infinite alternate;
 }
 
 .animate-ambient-reverse {
-  animation: ambientDriftReverse 22s ease-in-out infinite alternate;
+  animation: ambientDriftReverse 18s ease-in-out infinite alternate;
 }
+
+.animate-road-matrix {
+  animation: roadMatrixFlow 4s linear infinite;
+}
+
+.animate-diagonal-sweep {
+  animation: diagonalSweep 10s ease-in-out infinite;
+}
+
+/* Continuous Multi-Shade Gradient Flow */
+@keyframes gradientFlow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-gradient-flow {
+  background-size: 200% 200%;
+  animation: gradientFlow 5s ease infinite;
+}
+
+/* Border Beam Moving Laser Light */
+@keyframes borderBeam {
+  0% {
+    offset-distance: 0%;
+  }
+  100% {
+    offset-distance: 100%;
+  }
+}
+
+@keyframes borderRotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-border-rotate {
+  animation: borderRotate 4s linear infinite;
+}
+
+/* Heartbeat Waveform Glow Pulse */
+@keyframes heartbeatPulse {
+  0%, 100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 4px rgba(6, 182, 212, 0.4));
+  }
+  20% {
+    transform: scale(1.12);
+    filter: drop-shadow(0 0 12px rgba(6, 182, 212, 0.8));
+  }
+  40% {
+    transform: scale(1.02);
+    filter: drop-shadow(0 0 6px rgba(6, 182, 212, 0.5));
+  }
+  60% {
+    transform: scale(1.08);
+    filter: drop-shadow(0 0 10px rgba(6, 182, 212, 0.7));
+  }
+}
+
+.animate-heartbeat-glow {
+  animation: heartbeatPulse 2.8s ease-in-out infinite;
+}
+
+/* 3D Perspective Preservation */
+.perspective-1000 {
+  perspective: 1000px;
+}
+.perspective-1200 {
+  perspective: 1200px;
+}
+.transform-style-3d {
+  transform-style: preserve-3d;
+}
+
+/* --- Linear / Dribbble SaaS Aesthetic Keyframes --- */
+@keyframes floatOrb1 {
+  0%, 100% { transform: translate(0px, 0px) scale(1); }
+  25% { transform: translate(100px, 80px) scale(1.15); }
+  50% { transform: translate(60px, 140px) scale(0.95); }
+  75% { transform: translate(-40px, 60px) scale(1.1); }
+}
+@keyframes floatOrb2 {
+  0%, 100% { transform: translate(0px, 0px) scale(1); }
+  33% { transform: translate(-120px, 100px) scale(1.2); }
+  66% { transform: translate(-60px, -80px) scale(0.9); }
+}
+@keyframes floatOrb3 {
+  0%, 100% { transform: translate(0px, 0px) scale(1); }
+  40% { transform: translate(80px, -100px) scale(1.1); }
+  80% { transform: translate(-60px, -60px) scale(1.15); }
+}
+
+@keyframes particleRise {
+  0% {
+    transform: translateY(0px) scale(0.8);
+    opacity: 0.1;
+  }
+  50% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateY(-160px) scale(1.2);
+    opacity: 0;
+  }
+}
+
+@keyframes shimmerSweep {
+  0% {
+    transform: translateX(-150%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes heroFloat {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-12px);
+  }
+}
+
+@keyframes pulseRing {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+
+@keyframes mapMarkerPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+@keyframes gradientShift {
+  0% {
+    filter: hue-rotate(0deg);
+  }
+  50% {
+    filter: hue-rotate(180deg);
+  }
+  100% {
+    filter: hue-rotate(360deg);
+  }
+}
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-float-orb1 {
+  animation: floatOrb1 18s ease-in-out infinite;
+}
+
+.animate-float-orb2 {
+  animation: floatOrb2 22s ease-in-out infinite;
+}
+
+.animate-float-orb3 {
+  animation: floatOrb3 26s ease-in-out infinite;
+}
+
+.animate-hero-float {
+  animation: heroFloat 4s ease-in-out infinite;
+}
+
+.animate-pulse-ring {
+  animation: pulseRing 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+.animate-map-marker-pulse {
+  animation: mapMarkerPulse 2.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+.animate-shimmer-sweep {
+  animation: shimmerSweep 3.5s ease-in-out infinite;
+}
+
+.animate-gradient-shift {
+  animation: gradientShift 8s linear infinite;
+}
+
+.animate-marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 22s linear infinite;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+/* Custom Leaflet Dark Popup */
+.custom-leaflet-popup .leaflet-popup-content-wrapper {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+.custom-leaflet-popup .leaflet-popup-tip {
+  background: #0c0d1e !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+}
+.custom-leaflet-popup .leaflet-popup-content {
+  margin: 0 !important;
+  line-height: inherit !important;
+}
+
+/* High-Tech Dark Mode Filter for OpenStreetMap Tiles */
+.dark-map-container .leaflet-tile {
+  filter: brightness(0.6) invert(1) contrast(2.6) hue-rotate(205deg) saturate(0.35);
+}
+
+.dark-map-container .leaflet-bar a {
+  background-color: rgba(12, 13, 30, 0.85) !important;
+  color: #f1f5f9 !important;
+  border-color: rgba(255, 255, 255, 0.15) !important;
+  backdrop-filter: blur(8px);
+}
+.dark-map-container .leaflet-bar a:hover {
+  background-color: rgba(30, 41, 59, 0.95) !important;
+  color: #38bdf8 !important;
+}
+
+/* Hero Gradient Text Flow Animation */
+@keyframes gradientShiftText {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-gradient-shift-text {
+  background: linear-gradient(270deg, #6366f1, #8b5cf6, #06b6d4, #8b5cf6, #6366f1);
+  background-size: 300% 300%;
+  animation: gradientShiftText 6s ease infinite;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+
+
+
+

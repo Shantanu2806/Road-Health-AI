@@ -4,7 +4,7 @@ const ThemeContext = createContext();
 
 export function ThemeProvider({ children }) {
   // Theme state kept in React state only (in-memory only, NO localStorage/sessionStorage)
-  // Defaults to dark mode on load
+  // Defaults to dark mode on load (can be manually toggled to light mode)
   const [isDark, setIsDark] = useState(true);
 
   const toggleTheme = () => {

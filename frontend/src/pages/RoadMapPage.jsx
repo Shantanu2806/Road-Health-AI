@@ -93,20 +93,25 @@ export default function RoadMapPage() {
 
     filtered.forEach((item) => {
       const score = item.road_health_score;
+      const sev = (item.severity || "").toLowerCase();
 
-      // Color mapping
-      let color = "#FFD700"; // Fair (61-80)
-      if (score <= 30) {
-        color = "#8B0000"; // Critical (0-30) Dark red
-      } else if (score <= 60) {
-        color = "#FF6600"; // Poor (31-60) Orange
-      }
-
-      // Size mapping based on severity
+      // Severity Color Mapping:
+      // High severity or Critical score -> Red
+      // Medium severity or Poor score -> Orange
+      // Low severity or Fair score -> Yellow
+      let color = "#EAB308"; // Low / Fair (Yellow)
+      let severityLabel = "Low Severity";
       let radius = 8;
-      if (item.severity === "High") radius = 14;
-      else if (item.severity === "Medium") radius = 11;
-      else radius = 7;
+
+      if (sev === "high" || score <= 30) {
+        color = "#DC2626"; // High Severity / Critical (Red)
+        severityLabel = "High Severity";
+        radius = 14;
+      } else if (sev === "medium" || score <= 60) {
+        color = "#F97316"; // Medium Severity / Poor (Orange)
+        severityLabel = "Medium Severity";
+        radius = 11;
+      }
 
       const marker = L.circleMarker([item.latitude, item.longitude], {
         radius,
@@ -122,7 +127,7 @@ export default function RoadMapPage() {
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-width: 190px; padding: 4px;">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
             <span style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: ${color}; letter-spacing: 0.5px;">
-              ${item.condition_label} CONDITION
+              ${severityLabel} • ${item.condition_label}
             </span>
             <span style="font-size: 10px; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; color: #475569; font-family: monospace;">
               #${item.id}
@@ -135,7 +140,7 @@ export default function RoadMapPage() {
             <strong>Defects Detected:</strong> ${item.defect_count} defect(s)
           </div>
           <div style="font-size: 11px; color: #334155; margin-bottom: 2px;">
-            <strong>Severity:</strong> ${item.severity}
+            <strong>Severity:</strong> <span style="color: ${color}; font-weight: 700;">${item.severity}</span>
           </div>
           <div style="font-size: 11px; color: #334155; margin-bottom: 6px;">
             <strong>Location:</strong> ${item.location_name || "Pinned Road"}
@@ -210,21 +215,21 @@ export default function RoadMapPage() {
         </div>
         <div className="space-y-1.5 text-[11px] text-slate-600 dark:text-slate-300">
           <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-[#8B0000] border border-white" />
+            <span className="w-3.5 h-3.5 rounded-full bg-[#DC2626] border border-white" />
             <span>
-              <strong>Critical (Score 0 – 30)</strong> • Immediate repair required
+              <strong>High Severity / Critical</strong> • Immediate repair required
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-[#FF6600] border border-white" />
+            <span className="w-3.5 h-3.5 rounded-full bg-[#F97316] border border-white" />
             <span>
-              <strong>Poor (Score 31 – 60)</strong> • Surface cavities & cracks
+              <strong>Medium Severity / Poor</strong> • Surface cavities & cracks
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-[#FFD700] border border-white" />
+            <span className="w-3.5 h-3.5 rounded-full bg-[#EAB308] border border-white" />
             <span>
-              <strong>Fair (Score 61 – 80)</strong> • Moderate distress
+              <strong>Low Severity / Fair</strong> • Moderate distress
             </span>
           </div>
           <div className="text-[10px] text-slate-400 italic pt-1 border-t border-slate-200 dark:border-slate-800">

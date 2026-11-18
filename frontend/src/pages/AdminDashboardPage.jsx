@@ -1,6 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import apiClient from "../api/api";
+import apiClient, { getMaintenanceSummary, exportTicketsCSV } from "../api/api";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  Legend,
+} from "recharts";
 import {
   ShieldAlert,
   Users,
@@ -26,6 +36,11 @@ import {
   ShieldCheck,
   KeyRound,
   Camera,
+  Ticket,
+  TrendingUp,
+  Download,
+  AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 
 export default function AdminDashboardPage() {
@@ -35,10 +50,12 @@ export default function AdminDashboardPage() {
   const [emailLogs, setEmailLogs] = useState([]);
   const [contractors, setContractors] = useState([]);
   const [pendingContractors, setPendingContractors] = useState([]);
+  const [ticketSummary, setTicketSummary] = useState(null);
+  const [exportingCSV, setExportingCSV] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [actionMessage, setActionMessage] = useState("");
-  const [activeTab, setActiveTab] = useState("users"); // "users" | "analyses" | "emails"
+  const [activeTab, setActiveTab] = useState("users"); // "users" | "analyses" | "emails" | "tickets"
 
   // Contractor modal & toast states
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -71,13 +88,17 @@ export default function AdminDashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const [statsRes, usersRes, analysesRes, logsRes, contractorsRes, pendingRes] = await Promise.all([
+      const [statsRes, usersRes, analysesRes, logsRes, contractorsRes, pendingRes, ticketsRes] = await Promise.all([
         apiClient.get("/admin/stats"),
         apiClient.get("/admin/users"),
         apiClient.get("/history?limit=100"),
         apiClient.get("/admin/email-logs?limit=50"),
         apiClient.get("/admin/contractors"),
         apiClient.get("/admin/pending-contractors"),
+        getMaintenanceSummary().catch((e) => {
+          console.error("Ticket summary error:", e);
+          return null;
+        }),
       ]);
       setStats(statsRes.data);
       setUsers(usersRes.data);
@@ -85,10 +106,31 @@ export default function AdminDashboardPage() {
       setEmailLogs(logsRes.data);
       setContractors(contractorsRes.data);
       setPendingContractors(pendingRes.data);
+      if (ticketsRes) setTicketSummary(ticketsRes);
     } catch (err) {
       setError("Failed to load administrative telemetry from backend.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleExportCSV = async () => {
+    setExportingCSV(true);
+    try {
+      const blob = await exportTicketsCSV();
+      const url = window.URL.createObjectURL(new Blob([blob]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `tickets_export_${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setToast({ type: "success", message: "Tickets exported to CSV successfully." });
+    } catch (err) {
+      console.error("CSV export failed:", err);
+      setToast({ type: "error", message: "Failed to export tickets CSV." });
+    } finally {
+      setExportingCSV(false);
     }
   };
 
@@ -440,6 +482,17 @@ export default function AdminDashboardPage() {
         >
           <Mail className="w-4 h-4" />
           <span>Email Alert Logs ({emailLogs.length})</span>
+        </button>
+        <button
+          onClick={() => setActiveTab("tickets")}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+            activeTab === "tickets"
+              ? "bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-md"
+              : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+          }`}
+        >
+          <Ticket className="w-4 h-4" />
+          <span>Ticket Management ({ticketSummary?.total_tickets ?? stats?.ticket_summary?.total ?? 0})</span>
         </button>
       </div>
 
@@ -1017,6 +1070,262 @@ export default function AdminDashboardPage() {
           </table>
         </div>
       </div>
+
+      {/* TAB 4: TICKET MANAGEMENT */}
+      {activeTab === "tickets" && (
+        <div className="space-y-6">
+          {/* Top Actions & Quick Links Header */}
+          <div className="p-6 rounded-3xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Ticket className="w-5 h-5 text-amber-500" />
+                <span>Road Maintenance Ticket System</span>
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                Automated road damage tracking, contractor lifecycle dispatch, and verification
+              </p>
+            </div>
+            <div className="flex items-center gap-3 w-full sm:w-auto">
+              <button
+                onClick={handleExportCSV}
+                disabled={exportingCSV}
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold transition-all shadow-sm disabled:opacity-50 cursor-pointer"
+              >
+                {exportingCSV ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
+                <span>Export CSV</span>
+              </button>
+              <Link
+                to="/tickets"
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold transition-all shadow-sm hover:opacity-90"
+              >
+                <span>Manage All Tickets</span>
+                <ExternalLink className="w-4 h-4" />
+              </Link>
+            </div>
+          </div>
+
+          {/* 5 Summary KPI Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            {/* Total */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm">
+              <div className="text-[11px] font-semibold text-slate-400">Total Tickets</div>
+              <div className="mt-1 text-2xl font-extrabold text-slate-900 dark:text-white font-mono">
+                {ticketSummary?.total_tickets ?? stats?.ticket_summary?.total ?? 0}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">Reported & Logged</div>
+            </div>
+
+            {/* Open */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm">
+              <div className="text-[11px] font-semibold text-blue-500">Open Tickets</div>
+              <div className="mt-1 text-2xl font-extrabold text-blue-600 dark:text-blue-400 font-mono">
+                {ticketSummary?.open_tickets ?? 0}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">Active in workflow</div>
+            </div>
+
+            {/* Resolved */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm">
+              <div className="text-[11px] font-semibold text-emerald-500">Resolved</div>
+              <div className="mt-1 text-2xl font-extrabold text-emerald-600 dark:text-emerald-400 font-mono">
+                {ticketSummary?.resolved_tickets ?? (stats?.ticket_summary?.by_status?.Resolved || 0)}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">Approved repairs</div>
+            </div>
+
+            {/* Overdue */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900/80 border border-rose-300 dark:border-rose-800/80 bg-rose-50/50 dark:bg-rose-950/20 shadow-sm">
+              <div className="text-[11px] font-semibold text-rose-600 dark:text-rose-400 flex items-center gap-1">
+                <span>⚠️</span>
+                <span>Overdue</span>
+              </div>
+              <div className="mt-1 text-2xl font-extrabold text-rose-600 dark:text-rose-400 font-mono">
+                {ticketSummary?.overdue_tickets ?? stats?.overdue_tickets ?? 0}
+              </div>
+              <div className="text-[10px] text-rose-600/80 dark:text-rose-400/70 mt-0.5">Past target deadline</div>
+            </div>
+
+            {/* Critical */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900/80 border border-red-300 dark:border-red-800/80 bg-red-50/50 dark:bg-red-950/20 shadow-sm">
+              <div className="text-[11px] font-semibold text-red-600 dark:text-red-400 flex items-center gap-1">
+                <span>🔴</span>
+                <span>Critical Priority</span>
+              </div>
+              <div className="mt-1 text-2xl font-extrabold text-red-600 dark:text-red-400 font-mono">
+                {ticketSummary?.tickets_by_priority?.Critical ?? (stats?.ticket_summary?.by_priority?.Critical || 0)}
+              </div>
+              <div className="text-[10px] text-red-600/80 dark:text-red-400/70 mt-0.5">Highest repair urgency</div>
+            </div>
+          </div>
+
+          {/* 30-Day Trend Chart */}
+          <div className="p-6 rounded-3xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4 text-cyan-500" />
+                  <span>Tickets Created vs. Resolved Trend (Last 30 Days)</span>
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Daily intake volume compared with completed contractor repairs
+                </p>
+              </div>
+              {ticketSummary?.avg_resolution_time_hours != null && (
+                <div className="text-xs text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-3 py-1 rounded-xl">
+                  Avg. Resolution Time: <span className="font-bold font-mono text-cyan-600 dark:text-cyan-400">{ticketSummary.avg_resolution_time_hours} hrs</span>
+                </div>
+              )}
+            </div>
+
+            <div className="h-64 w-full">
+              {ticketSummary?.tickets_created_vs_resolved && ticketSummary.tickets_created_vs_resolved.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={ticketSummary.tickets_created_vs_resolved}
+                    margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="colorCreated" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="colorResolved" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
+                    <XAxis
+                      dataKey="date"
+                      tick={{ fill: "#64748b", fontSize: 10 }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      tick={{ fill: "#64748b", fontSize: 10 }}
+                      tickLine={false}
+                      allowDecimals={false}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#0f172a",
+                        borderColor: "#334155",
+                        borderRadius: "12px",
+                        fontSize: "12px",
+                        color: "#f8fafc",
+                      }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
+                    <Area
+                      type="monotone"
+                      dataKey="created"
+                      stroke="#06b6d4"
+                      strokeWidth={2}
+                      fillOpacity={1}
+                      fill="url(#colorCreated)"
+                      name="Tickets Created"
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="resolved"
+                      stroke="#10b981"
+                      strokeWidth={2}
+                      fillOpacity={1}
+                      fill="url(#colorResolved)"
+                      name="Tickets Resolved"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-xs text-slate-400 italic">
+                  No ticket activity logged in the past 30 days
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Bottom Grid: Status & Priority Telemetry + Top Locations */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Status & Priority Breakdown (6 cols) */}
+            <div className="lg:col-span-6 p-6 rounded-3xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                Ticket Status & Priority Breakdown
+              </h3>
+              
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-400">By Lifecycle Status</div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {Object.entries(ticketSummary?.tickets_by_status || stats?.ticket_summary?.by_status || {}).map(([st, cnt]) => (
+                    <div
+                      key={st}
+                      className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 flex items-center justify-between"
+                    >
+                      <span className="text-xs text-slate-700 dark:text-slate-300">{st}</span>
+                      <span className="font-mono font-bold text-xs text-slate-900 dark:text-white">{cnt}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                <div className="text-xs font-semibold text-slate-400">By Priority Rating</div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {Object.entries(ticketSummary?.tickets_by_priority || stats?.ticket_summary?.by_priority || {}).map(([pr, cnt]) => (
+                    <div
+                      key={pr}
+                      className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 flex items-center justify-between"
+                    >
+                      <span className="text-xs text-slate-700 dark:text-slate-300">{pr}</span>
+                      <span className="font-mono font-bold text-xs text-slate-900 dark:text-white">{cnt}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Top Locations (6 cols) */}
+            <div className="lg:col-span-6 p-6 rounded-3xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-emerald-500" />
+                  <span>Top 5 Defect Hotspot Locations</span>
+                </h3>
+                <span className="text-xs text-slate-400">By Ticket Volume</span>
+              </div>
+
+              <div className="space-y-3">
+                {ticketSummary?.top_locations && ticketSummary.top_locations.length > 0 ? (
+                  ticketSummary.top_locations.map((loc, idx) => (
+                    <div
+                      key={loc.location || idx}
+                      className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/50 flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="w-6 h-6 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 font-bold text-xs flex items-center justify-center shrink-0">
+                          #{idx + 1}
+                        </span>
+                        <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                          {loc.location}
+                        </span>
+                      </div>
+                      <span className="font-mono text-xs font-bold text-cyan-600 dark:text-cyan-400 px-2.5 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 shrink-0">
+                        {loc.count} {loc.count === 1 ? "ticket" : "tickets"}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="py-8 text-center text-xs text-slate-400 italic">
+                    No location data logged on current tickets yet
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ========================================================================= */}
       {/* ADD CONTRACTOR MODAL                                                      */}

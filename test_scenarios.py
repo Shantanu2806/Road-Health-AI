@@ -49,6 +49,22 @@ def generate_invalid_file(path: Path):
     path.write_text("This is an invalid text document, not a road surface image.")
 
 
+AUTH_HEADERS = {}
+
+def get_auth_headers():
+    global AUTH_HEADERS
+    if not AUTH_HEADERS:
+        login_resp = requests.post(
+            f"{BASE_URL}/auth/login",
+            json={"email": "kauteshantanu0@gmail.com", "password": "Shantanu@123"},
+            timeout=10,
+        )
+        if login_resp.status_code == 200:
+            token = login_resp.json().get("access_token")
+            AUTH_HEADERS = {"Authorization": f"Bearer {token}"}
+    return AUTH_HEADERS
+
+
 def run_test_scenario(scenario_num: int, title: str, file_path: Path, expect_success: bool = True):
     print(f"\n[SCENARIO {scenario_num}] {title}")
     print(f"  Target File: {file_path.name}")
@@ -57,7 +73,7 @@ def run_test_scenario(scenario_num: int, title: str, file_path: Path, expect_suc
         with open(file_path, "rb") as f:
             files = {"file": (file_path.name, f, "application/octet-stream")}
             data = {"conf_threshold": "0.40"}
-            resp = requests.post(f"{BASE_URL}/analyze", files=files, data=data, timeout=15)
+            resp = requests.post(f"{BASE_URL}/analyze", files=files, data=data, headers=get_auth_headers(), timeout=15)
 
         print(f"  HTTP Status Code: {resp.status_code}")
 
